@@ -1,0 +1,272 @@
+local building_resource = class("building_resource", building_main)
+
+function building_resource:ctor(...)
+    self._gainTime = CfgCtrl:getGeneralCfg("General_6")
+    building_resource.super.ctor(self, ...)
+end
+
+function building_resource:dispose()
+    Timer:remove("building_resource" .. self._buildId)
+    Timer:remove("updateTopProgress-timeKey" .. self._buildId)
+    Timer:remove("building_resource-isShowGain" .. self._buildId)
+    building_resource.super.dispose(self)
+end
+
+function building_resource:updateBuildInfo(...)
+    building_resource.super.updateBuildInfo(self, ...)
+    local buildInfo = jianzhu_mgr:getBuildInfo(self._buildId)
+    if buildInfo and buildInfo.lv == 0 then
+        return
+    end
+    if not Timer:isExist("building_resource" .. self._buildId) then
+        Timer:add("building_resource" .. self._buildId, handler(self, self.onResTimer), 0, 5)
+    end
+end
+
+function building_resource:setBuildType(buildType)
+    building_resource.super.setBuildType(self, buildType)
+    local cfgName = jianzhu_mgr:getBeforeUpgradeConditionCfgName(self._buildType, true)
+    self._upgradeCfg = CfgCtrl:getCfg(cfgName)
+end
+
+function building_resource:onResTimer()
+    local isEdit = jianzhu_mgr:getIsEdit()
+    if self._isOther or self._isOtherEdit or isEdit then
+        return
+    end
+    self:checkGain(true)
+end
+
+function building_resource:checkGain(needUpdate)
+    if self._buildId == 0 then
+        return
+    end
+    local bType, sxId, buffId = self._buildType
+    local gainBuildingInfo = jianzhu_mgr:getGainBuildingInfo(bType) -- 上次收货的时间戳
+    if not gainBuildingInfo then
+        return
+    end
+    if bType == 24 then
+        -- buffId = 9302
+        sxId = 1064
+    elseif bType == 25 then
+        -- buffId = 9303
+        sxId = 1063
+    elseif bType == 26 then
+        -- buffId = 9301
+        sxId = 1062
+    elseif bType == 27 then
+        -- buffId = 1233
+        sxId = 1234
+    -- elseif bType == 41 then
+    --     sxId = 1281
+    -- elseif bType == 42 then
+    --     sxId = 1282
+    end
+    local isLimit, oneTime = self:judgeResIsUpperLimit(sxId, bType, buffId, gainBuildingInfo)
+    local arr = {41, 42, 44}
+    local isSpecial = table.indexof(arr, self._buildType)
+    if not isSpecial then
+        self._canGetResource = true
+    else
+        self._canGetResource = isLimit
+    end
+    self._isUpperLimit = isLimit
+    local nextTime = gainBuildingInfo.time + self._gainTime
+    local nowTime = denglu_mgr:getServerTime()
+    if gainBuildingInfo.time == 0 then
+        nextTime = nextTime + nowTime
+    end
+    local isShowGain = nowTime >= nextTime
+    self._gainProgState = isShowGain and 1 or 0
+
+    self._showGain, self._gainUrl, self._iconColor = isShowGain, nil, nil
+    local isChange = self._lastShowGain == nil or self._lastShowGain ~= isShowGain
+    if needUpdate or isChange or self._isUpperLimit then
+        self:updateTopIcon()
+        self:updateTopProgress(nextTime - self._gainTime, oneTime, isSpecial)
+    end
+    if self._lastShowGain and not isShowGain then
+        Timer:add(
+            "building_resource-isShowGain" .. self._buildId,
+            function()
+                self:checkGain(true)
+            end,
+            1,
+            0,
+            self._gainTime
+        )
+    end
+    self._lastShowGain = isShowGain
+    if not isShowGain and aliveLevel_mgr:checkIsCanAllocation(self._buildId) then
+        self._showGain = true
+        self._gainUrl = "ui://zhucheng/img_nm"
+        self._iconColor = 3
+        self:updateTopIcon()
+    end
+end
+
+-- 更新资源顶部
+function building_resource:updateTopProgress(lastTime, oneTime, isSpecial)
+    if self._topIconPart and self._topIconPart.visible and not self._topProgImg then
+        self._topProgImg = self._topIconPart:GetChild("resProg")
+        self._topProgImg.fillAmount = 0
+        self._topProgImg.visible = true
+        self._topProgImg2 = self._topIconPart:GetChild("resProg2"):GetChild("resProg2")
+        self._topProgImg2.rotation = 0
+        self._topProgMask = self._topIconPart:GetChild("resProg2"):GetChild("n13")
+        self._showNumTxt = self._topIconPart:GetChild("n12")
+    end
+    local timeKey = "updateTopProgress-timeKey" .. self._buildId
+    if self._isUpperLimit or not self._topIconPart or not self._topIconPart.visible then
+        Timer:remove(timeKey)
+        if self._topProgImg then
+            self._topProgImg.fillAmount = 0
+            self._topProgImg2.visible = false
+            self._topProgMask.visible = true
+            self._topProgImg2.rotation = 0
+            if isSpecial then
+                local curTime = denglu_mgr:getServerTime()
+                local num = math.floor(curTime - lastTime)
+                local maxNum = self._upgradeCfg[self._buildInfo.lv].storeLimit * 60
+                num = math.min(num, maxNum)
+                self:updateResNum(num // oneTime)
+            end
+        end
+        return
+    end
+    self._topProgImg2.visible = true
+    local isFresh = false
+    if isSpecial then
+        isFresh = not self._lastOneTime or self._lastOneTime ~= oneTime
+    end
+    if self._lastProgTime ~= lastTime or isFresh or not Timer:isExist(timeKey) then
+        self._lastOneTime = oneTime
+        self._lastProgTime = lastTime
+        local time = math.floor(denglu_mgr:getServerTime() - self._lastProgTime) % 10
+        local curValue = time / 10
+        local showIndex, showIndex2
+        local gapValue = 0.01
+        local mathF = math.floor
+        Timer:add(
+            timeKey,
+            function()
+                local curTime = denglu_mgr:getServerTime()
+                if isSpecial then
+                    local num = mathF(curTime - lastTime)
+                    curValue = num % oneTime / oneTime
+                    self:updateResNum(num // oneTime)
+                else
+                    curValue = curValue + gapValue
+                end
+                if curValue >= 1 then
+                    self._topProgImg.fillAmount = 1
+                    self._topProgImg2.rotation = 0
+                    curValue = 0
+                else
+                    self._topProgImg.fillAmount = curValue
+                    self._topProgImg2.rotation = curValue * 360
+                end
+                showIndex2 = curValue < 0.5 and 1 or 0
+                if showIndex ~= showIndex2 then
+                    showIndex = showIndex2
+                    self._topProgMask.visible = showIndex == 1
+                end
+            end,
+            0,
+            0.1
+        )
+    end
+end
+
+function building_resource:updateResNum(num)
+    num = num and num > 0 and num or 0
+    self._showNumTxt.text = num
+    self._canGetResource = num > 0
+end
+
+function building_resource:canSkipGain()
+    if jianzhu_mgr:getIsEdit() then
+        return true
+    end
+    return false
+end
+
+function building_resource:clickGain(isBuildClick)
+    local isEdit = jianzhu_mgr:getIsEdit()
+    if isEdit then
+        return false
+    end
+    if self._gainProgState == 1 then -- 资源可收获
+        local bType, resId = self._buildType
+        if bType == 24 then
+            resId = ItemConstant.RES_ITEM_3
+        elseif bType == 25 then
+            resId = ItemConstant.RES_ITEM_2
+        elseif bType == 26 then
+            resId = ItemConstant.RES_ITEM_1
+        elseif bType == 27 then -- 金属花
+            resId = ItemConstant.BEAST_ITEM
+        elseif bType == 41 then
+            resId = ItemConstant.RES_ITEM_5
+        elseif bType == 42 then
+            resId = ItemConstant.RES_ITEM_6
+        elseif bType == 44 then
+            resId = ItemConstant.RES_ITEM_7
+        end
+        local buildId = self._buildId
+        if beibao_mgr:checkResIsSaveUpperLimit(resId) then
+            alert_mgr:showPrompt(
+                "NormalCityBuilding:checkQuick",
+                getLang("bag_53"),
+                function(isCan)
+                    if isCan then
+                        jianzhu_mgr:homeBaseGainReq(buildId)
+                    end
+                end
+            )
+        elseif self._canGetResource then
+            jianzhu_mgr:homeBaseGainReq(buildId)
+        else
+            if not isBuildClick then
+                piaozitishi_mgr:showKey("lan6_10")
+            end
+            return true
+        end
+    else
+        if isBuildClick then --点击建筑打开不打开幸存者
+            return true
+        end
+        if aliveLevel_mgr:checkIsCanAllocation(self._buildId) then
+            SystemCtrl:open("aliveLevelBuildPop", self._buildId)
+        end
+    end
+    return false
+end
+
+function building_resource:judgeResIsUpperLimit(sxId, bType, buffId, gainBuildingInfo)
+    local rate = 0
+    if sxId then
+        rate = tjAttr_mgr:getAttr(sxId * 100) or 0
+        --幸存者的这几个属性是单独算的
+        rate = rate + aliveLevel_mgr:getAttrValueByBuildAndAttId(self._buildId, sxId)
+    end
+    local lv = self._buildInfo.lv
+    local type = self._buildType
+    local arr = {[24] = 1043, [25] = 1042, [26] = 1041, [27] = 1233, [41] = 1278, [42] = 1279, [44] = 1280}
+    local value = jianzhu_mgr:getCfgAttrValue(self._upgradeCfg[lv].attrImprove, arr[type])
+
+    local timeTemp = gainBuildingInfo.time + self._upgradeCfg[lv].storeLimit * 60
+    local curTime = denglu_mgr:getServerTime()
+    local isLimit = curTime >= timeTemp
+    local oneTime
+    if bType == 44 then
+        oneTime = value
+    else
+        local speed = value * (1 + rate) / 3600
+        oneTime = math.ceil(1 / speed)
+    end
+    return isLimit, oneTime
+end
+
+return building_resource
